@@ -28,14 +28,32 @@ def get_uncond_tokens_mask(tokenizer: Encoder):
 def get_tokens_and_mask(
     tokenizer: Encoder, prompt: str = "", context_len: int = 128
 ) -> Tuple[th.tensor, th.tensor]:
+    # tokens是空的 是uncond_tokens
     if len(prompt) == 0:
         return get_uncond_tokens_mask(tokenizer)
+    
+    # 反之 得到tokens 和 mask
     else:
         tokens = tokenizer.encode(prompt)
         tokens, mask = tokenizer.padded_tokens_and_mask(tokens, context_len)
         tokens = th.tensor(tokens)  # + uncond_tokens)
         mask = th.tensor(mask, dtype=th.bool)  # + uncond_mask, dtype=th.bool)
         return tokens, mask
+
+def load_vit_weight(pretrain_path, model, device):
+    if pretrain_path != "":
+        print("------------load_pretrain_weight------------")
+        print('weights path : {}', pretrain_path)
+        assert os.path.exists(pretrain_path), "weights file: '{}' not exist.".format(pretrain_path)
+        weights_dict = th.load(pretrain_path, map_location=device)
+        # 删除不需要的权重
+        del_keys = ['head.weight', 'head.bias'] if model.has_logits \
+            else ['pre_logits.fc.weight', 'pre_logits.fc.bias', 'head.weight', 'head.bias']
+        print("------------下列层被删除------------")
+        for k in del_keys:
+            print(k)
+            del weights_dict[k]
+        print(model.load_state_dict(weights_dict, strict=False))
 
 
 def load_model(
@@ -47,34 +65,38 @@ def load_model(
     model_type: str = "base",
 ):
     assert model_type in MODEL_TYPES, f"Model must be one of {MODEL_TYPES}. Exiting."
-    if model_type in ["base", "base-inpaint"]:
+    if model_type in ["base", "base-inpaint"]:# base
         options = model_and_diffusion_defaults()
     elif model_type in ["upsample", "upsample-inpaint"]:
         options = model_and_diffusion_defaults_upsampler()
     if "inpaint" in model_type:
         options["inpaint"] = True
 
-    options["use_fp16"] = use_fp16
-    glide_model, glide_diffusion = create_model_and_diffusion(**options)
+    options["use_fp16"] = use_fp16# False
+    glide_model, glide_diffusion = create_model_and_diffusion(**options)# Unet / DM
     if activation_checkpointing:
         glide_model.use_checkpoint = True
 
     glide_model.requires_grad_(True)
-    if freeze_transformer:
+    if freeze_transformer:# False
         glide_model.transformer.requires_grad_(False)
         glide_model.transformer_proj.requires_grad_(False)
         glide_model.token_embedding.requires_grad_(False)
         glide_model.padding_embedding.requires_grad_(False)
         glide_model.positional_embedding.requires_grad_(False)
-    if freeze_diffusion:
+    if freeze_diffusion:# False
         glide_model.out.requires_grad_(False)
         glide_model.input_blocks.requires_grad_(False)
         glide_model.middle_block.requires_grad_(False)
         glide_model.output_blocks.requires_grad_(False)
-    if len(glide_path) > 0:  # user provided checkpoint
+    if len(glide_path) > 0:  # 待finetune的weight
         assert os.path.exists(glide_path), "glide path does not exist"
         weights = th.load(glide_path, map_location="cpu")
-        glide_model.load_state_dict(weights)
+        glide_model.load_state_dict(weights, strict=False)
+
+        vit_pretrain_path = '/root/Project/Diffusion_Model/CLIP_Related/glide-finetune_vit/weight/vit_base_patch16_224_in21k.pth'
+        load_vit_weight(vit_pretrain_path, glide_model.sketch_encoder, 'cpu')
+
     else:  # use default checkpoint from openai
         glide_model.load_state_dict(
             load_checkpoint(model_type, "cpu")
